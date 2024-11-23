@@ -1,10 +1,10 @@
 from graphviz import Digraph
-from mcts import MCTSNode
+from binary_tree import Node
 import textwrap
 import uuid
 
 
-def print_tree(node: MCTSNode | None, level: int = 0):
+def print_tree(node: Node | None, level: int = 0):
     if node is None:
         return
     indent = " " * level * 2
@@ -51,9 +51,15 @@ def visualize_mcts_tree(root_node, output_file="mcts_tree"):
                 reasoning = node.answer
         except:
             reasoning = node.answer
-            
+        
+        label = ""
+        if node.question:
+            label += f"Question: {wrap_text(node.question)}\n\n"
+        if reasoning:
+            label += f"Answer:\n{wrap_text(reasoning)}\n\n"
+        
         # Create formatted label with complete text
-        label = f"""Answer:\n{wrap_text(reasoning)}\nQ: {node.Q:.2f}\nVisits: {node.visits}\nReward: {node.reward_samples}\n\nCorrect solutions: {node.correct_solutions}\n\nTotal solutions: {node.total_solutions}\n\nProb: {getattr(node, 'probability', 0):.2f}"""
+        label += f"""Correct solutions: {node.correct_solutions}\n\nTotal solutions: {node.total_solutions}\n\nProb: {getattr(node, 'probability', 0):.2f}"""
         
         # Add node to graph with wrapped text
         dot.node(node_id, label)

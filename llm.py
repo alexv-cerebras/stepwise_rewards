@@ -12,10 +12,14 @@ OPENAI_BASE_URL = None
 def get_openai_api_key() -> str:
     return os.environ["OPENAI_API_KEY"]
 
-def _get_openai_client(base_url = None) -> openai.Client:
+def _get_openai_client(base_url = None, trace=False) -> openai.Client:
     api_key = get_openai_api_key()    
     print('api_key: ', api_key)
-    return openai.Client(api_key=api_key, base_url=base_url)
+    client = openai.Client(api_key=api_key, base_url=base_url)
+    if trace:
+        from opik.integrations.openai import track_openai
+        client = track_openai(client)
+    return client
 
 
 @retry(stop=stop_after_attempt(7), wait=wait_exponential(multiplier=1, min=4, max=10))

@@ -1,202 +1,104 @@
-from mcts import MCTS, MCTSNode
+from binary_tree import BinaryTree, Node
 from llm import openai_chat_completion
 from collections import deque
+import os
+import opik
 import re
 
+
+os.environ["OPIK_PROJECT_NAME"] = "stepwise_rewards"
+opik.configure(use_local=False)
     
 model="llama3.1-8b"
-judge_model="llama3.1-8b"
 
-critic_system_prompt=(
-    "I will provide you with previous steps of reasoning. "
-    "Provide a detailed and constructive critique to improve the answer for the current step only."
-    "Highlight specific areas that need refinement or correction."
-)
-evaluate_system_prompt=(
-    "I will provide you with previous steps of reasoning. "
-    "Provide a reward score between -100 and 100 for the answer for the current step's quality, using very strict standards. "
-    "Do not give a full score above 95. Make sure the reward score is an integer. "
-    "Return *ONLY* the score."
-)
+stop_tokens = [
+    "</s>",
+    "<|eot_id|>",
+    "Question:",
+    "Question",
+    "USER:",
+    "USER",
+    "ASSISTANT:",
+    "ASSISTANT",
+    "Instruction:",
+    "Instruction",
+    "Response:",
+    "Response",
+    "#",
+    "# ",
+    "###",
+    "### "
+]
 
-answer_final_format = """<reasoning>Refined reasoning step goes here</reasoning>
-<answer>Final answer</answer>
-"""
+with open("prompts/fewshot_prompt.txt") as f:
+    examples = f.read()
 
-answer_optional_format = """<reasoning>Refined reasoning step goes here</reasoning>
-<answer>Final answer if you can answer based on the previous reasoning and current step. If you can't, just leave empty.</answer>
-"""
-
-refine_system_prompt="""# Instruction
-I will provide you with previous steps of reasoning. Refine the answer for the current step only based on the critique and return only the refined reasoning step.
-
-## Additional guidelines
-- Your response should not refer to or discuss the criticisms.
-- Do not repeat the problem statement.
-
-You should return in the following format:
-{answer_format}
-"""
+with open("prompts/response_prompt.txt") as f:
+    generation_prompt = f.read()
 
 
-def parse_step(step_text: str) -> tuple[str, str]:
-    # Extract reasoning
-    reasoning_match = re.search(r'<reasoning>(.*?)</reasoning>', step_text, re.DOTALL)
-    reasoning = reasoning_match.group(1).strip() if reasoning_match else ""
+def concat_ost_steps(steps: list[str]) -> str:
+    existing_ost_steps = "\n".join([f"Step {i}: {step}" for i, step in enumerate(steps, start=1)])
+    next_step_id = len(steps) + 1
+    return existing_ost_steps, next_step_id
+
+def parse_step(step: str, step_idx: int):
+    if step_idx == -1:
+        # Pattern to match any step number followed by content
+        step_pattern = r'Step \d+:(.*?)(?:Step \d+|$)'
+        # Find all matches and take the last one
+        matches = list(re.finditer(step_pattern, step, re.DOTALL))
+        if matches:
+            # Return content of the last step
+            return matches[-1].group(1).strip()
+    else:
+        step_pattern = rf'Step {step_idx}:(.*?)(?:Step \d+|$)'
+        match = re.search(step_pattern, step, re.DOTALL)
+        if match:
+            return match.group(1).strip()
     
-    # Extract answer
-    answer_match = re.search(r'<answer>(.*?)</answer>', step_text, re.DOTALL)
-    answer = answer_match.group(1).strip() if answer_match else ""
-    return reasoning, answer
+    return step
+    
 
-
-class MCTSStepwise(MCTS):
-    def self_refine(self, node: MCTSNode, answer_format: str = answer_optional_format) -> MCTSNode:
-        reasoning_chain = node.get_reasoning_chain()
-        reasoning_chain = '\n'.join(reasoning_chain[:-1])
+class TreeStepwise(BinaryTree):
+    def generate_children(self, parent_node: Node, finalize=False) -> list[Node]:
+        reasoning_chain = parent_node.get_reasoning_chain()
+        existing_ost_steps, next_step_id = concat_ost_steps(reasoning_chain)
         
-        critique_response = openai_chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": critic_system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": "\n\n".join(
-                        [
-                            f"<problem>\n{self.problem}\n</problem>",
-                            f"<reasoning_chain>\n{reasoning_chain}\n</reasoning_chain>",
-                            f"<current_answer>\n{node.answer}\n</current_answer>",
-                        ]
-                    ),
-                },
-            ],
-            model=judge_model,
-            client=self.client,
-            max_tokens=4000,
-            temperature=0.1
+        ost_input = (
+            generation_prompt.format(instruction=self.problem, examples=examples)
+            + existing_ost_steps
+            + f"Step {next_step_id}:"
         )
-        critique = critique_response.choices[0].message.content
-        assert critique is not None
-        self.critiques.append(critique)
         
-        refine_prompt = refine_system_prompt.format(answer_format=answer_format)
-        
-        messages=[
-            {
-                "role": "system",
-                "content": refine_prompt,
-            },
-            {
-                "role": "user",
-                "content": "\n\n".join(
-                    [
-                        f"<problem>\n{self.problem}\n</problem>",
-                        f"<reasoning_chain>\n{reasoning_chain}\n</reasoning_chain>",
-                        f"<current_answer>\n{node.answer}\n</current_answer>",
-                        f"<critique>\n{critique}\n</critique>",
-                    ]
-                ),
-            },
-        ]
-        
-        for attempt in range(3):
-            refined_answer_response = openai_chat_completion(
-                    messages=messages,
-                    model=model,
-                    client=self.client,
-                    max_tokens=4000,
-                    temperature=1.0,
-                )
-            assert refined_answer_response.choices[0].message.content is not None
-            
-            reasoning, answer = parse_step(refined_answer_response.choices[0].message.content)
-            refined_answer = f"<reasoning>{reasoning}</reasoning>\n<answer>{answer}</answer>"
-            
-            messages.extend(
-                [
-                    {
-                        "role": "assistant",
-                        "content": refined_answer_response.choices[0].message.content,
-                    },
+        children = []
+        n = 1 if finalize else self.max_children
+        for _ in range(n):
+            response = openai_chat_completion(
+                messages=[
                     {
                         "role": "user",
-                        "content": f"""Failed to parse response in the following format:
-                        {answer_format}""",
+                        "content": ost_input,
                     },
-                ]
+                ],
+                model=model,
+                client=self.client,
+                max_tokens=256,
+                temperature=1.0
             )
+            step_reasoning = response.choices[0].message.content
+            assert step_reasoning is not None
             
-            if reasoning or attempt == 2:
-                break   
-        
-        assert reasoning is not None 
-        node = MCTSNode(answer=refined_answer, parent=node)
-        if answer:
-            node.is_leaf = True
-        
-        self.refinements.append(refined_answer)
-        return node
-
-    def _evaluate_answer(self, node: MCTSNode, temperature=0.8) -> int:
-        reasoning_chain = node.get_reasoning_chain()
-        reasoning_chain = '\n'.join(reasoning_chain[:-1])
-        
-        messages = [
-            {
-                "role": "system",
-                "content": evaluate_system_prompt,
-            },
-            {
-                "role": "user",
-                "content": "\n\n".join(
-                    [
-                        f"<problem>\n{self.problem}\n</problem>",
-                        f"<reasoning_chain>\n{reasoning_chain}\n</reasoning_chain>",
-                        f"<current_answer>\n{node.answer}\n</current_answer>",
-                    ]
-                ),
-            },
-        ]
-        for attempt in range(3):
-            try:
-                response = openai_chat_completion(
-                    messages=messages,
-                    model=judge_model,
-                    client=self.client,
-                    max_tokens=4000,
-                    temperature=0.1
-                )
-                assert response.choices[0].message.content is not None
-                
-                answer = float(response.choices[0].message.content)
-                return answer
-            except ValueError:
-                messages.extend(
-                    [
-                        {
-                            "role": "assistant",
-                            "content": response.choices[0].message.content,
-                        },
-                        {
-                            "role": "user",
-                            "content": "Failed to parse reward as float.",
-                        },
-                    ]
-                )
-                if attempt == 2:
-                    raise
-                
-    def run(self):
-        super().run()
-        self.finalize_answer()
+            step_reasoning = parse_step(step_reasoning, next_step_id)
+            node = Node(answer=step_reasoning, parent=parent_node)
+            children.append(node)
+        return children
                 
     def finalize_answer(self):
         """
         Finalize answer in leaf nodes
         """
-        candidates: list[MCTSNode] = []
+        candidates: list[Node] = []
         to_consider = deque([self.root])
 
         while to_consider:
@@ -207,12 +109,12 @@ class MCTSStepwise(MCTS):
                 candidates.append(current_node)
         
         for candidate in candidates:
-            child = self.self_refine(candidate, answer_final_format)
-            candidate.add_child(child)
+            child = self.generate_children(candidate, finalize=True)
+            candidate.add_child(child[0])
                 
     def count_solutions(self, correct_answer: str):
         def func_to_check(answer, correct_answer):  
-            _, answer = parse_step(answer)
+            answer = parse_step(answer, -1)
             messages=[
                 {
                     "role": "system",
@@ -232,7 +134,7 @@ class MCTSStepwise(MCTS):
                     messages=messages,
                     model=model,
                     client=self.client,
-                    max_tokens=4000,
+                    max_tokens=64,
                     temperature=0.1
                 )
                 assert response.choices[0].message.content is not None
