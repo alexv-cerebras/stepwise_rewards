@@ -39,24 +39,9 @@ def visualize_mcts_tree(root_node, output_file="mcts_tree"):
     
     def add_node(node, parent_id=None):
         node_id = str(uuid.uuid4())
-        
-        # Extract reasoning if it's in JSON format
-        try:
-            # If the answer is a string containing JSON, parse it properly
-            if isinstance(node.answer, str) and node.answer.startswith('{'):
-                import json
-                answer_dict = json.loads(node.answer)
-                reasoning = answer_dict.get('reasoning', '')
-            else:
-                reasoning = node.answer
-        except:
-            reasoning = node.answer
-        
+
         label = ""
-        if node.question:
-            label += f"Question: {wrap_text(node.question)}\n\n"
-        if reasoning:
-            label += f"Answer:\n{wrap_text(reasoning)}\n\n"
+        label += f"State: {wrap_text(node.state)}\n\n"
         
         # Create formatted label with complete text
         label += f"""Correct solutions: {node.correct_solutions}\n\nTotal solutions: {node.total_solutions}\n\nProb: {getattr(node, 'probability', 0):.2f}"""
