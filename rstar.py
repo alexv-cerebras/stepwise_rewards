@@ -4,8 +4,6 @@ import logging
 from typing import List, Dict, Any, Tuple
 import re
 import asyncio
-import aiohttp
-from concurrent.futures import ThreadPoolExecutor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,8 +18,66 @@ class Node:
         self.visits = 0
         self.correct_solutions = 0
         self.total_solutions = 0
-        self.probability = 0.0
         self.value = 0.0
+        
+    def count_solutions(self, correct_answer: str):
+        # if probability is already calculated, return
+        if hasattr(self, 'probability'):
+            return
+        
+        if not self.children:
+            self.total_solutions += 1
+            is_correct = self.extract_answer()[0] == correct_answer
+            if is_correct:
+                self.correct_solutions += 1
+            # calculate probability for this node
+            self.probability = self.correct_solutions / self.total_solutions
+        else:
+            for child in self.children:
+                child.count_solutions(correct_answer)
+            self.correct_solutions = sum([child.correct_solutions for child in self.children])
+            self.total_solutions = sum([child.total_solutions for child in self.children])
+            # calculate probability for this node
+            self.probability = self.correct_solutions / (self.total_solutions + 1e-5)
+        
+    def extract_answer(self) -> Tuple[str, float]:
+        logger.debug(f"Extracting answer from state: {self.state}")
+        patterns = [
+            r"The answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"The final answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"Therefore, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"So, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"Thus, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"In conclusion, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, self.state)
+            if match:
+                answer = match.group(1)
+                confidence = 1.0
+                logger.debug(f"Answer found using pattern '{pattern}': {answer}")
+                return answer, confidence
+        
+        # If no pattern is found, try to extract any number
+        numbers = re.findall(r'-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?', self.state)
+        if numbers:
+            answer = numbers[-1]  # Take the last number found
+            confidence = 0.5  # Lower confidence as it's not in the expected format
+            logger.debug(f"No pattern found. Using last number as answer: {answer}")
+            return answer, confidence
+        
+        logger.warning("No answer found in the state.")
+        return "", 0.0
+    
+    def evaluate(self) -> float:        
+        # Extract the final answer from the node's state
+        _, confidence = self.extract_answer()
+        return confidence
+    
+    def is_terminal(self):
+        return self.evaluate() != 0
+
 
 class RStar:
     def __init__(self, system: str, client, model: str, max_depth: int = 3, num_rollouts: int = 5, c: float = 1.4):
@@ -30,7 +86,7 @@ class RStar:
         self.max_depth = max_depth
         self.num_rollouts = num_rollouts
         self.c = c
-        self.actions = ["A1", "A2", "A3", "A4", "A5"]
+        self.actions = ["A1"]
         self.original_question = None 
         self.system = system
         self.rstar_completion_tokens = 0
@@ -38,8 +94,12 @@ class RStar:
 
     async def generate_response_async(self, prompt: str) -> str:
         return await asyncio.to_thread(self.generate_response, prompt)
-
+    
     async def expand_async(self, node: Node, action: str) -> Node:
+        if node.is_terminal():
+            logger.debug("Node is terminal. No expansion needed.")
+            return node
+        
         prompt = self.create_prompt(node.state, action)
         new_state = await self.generate_response_async(prompt)
         child_node = Node(new_state, action, node)
@@ -51,14 +111,14 @@ class RStar:
         current_node = node
         depth = 0
         logger.debug("Starting simulation")
-        while depth < self.max_depth:
+        while depth < self.max_depth and not current_node.is_terminal():
             if not current_node.children:
                 action = random.choice(self.actions)
                 current_node = await self.expand_async(current_node, action)
             else:
                 current_node = random.choice(current_node.children)
             depth += 1
-        value = self.evaluate(current_node)
+        value = current_node.evaluate()
         logger.debug(f"Simulation complete. Final value: {value}")
         return value
 
@@ -72,11 +132,15 @@ class RStar:
 
     async def mcts_rollout_async(self, root: Node):
         node = root
-        while node.children:
+        while node.children and not node.is_terminal():
             node, _ = self.select_action(node)
         action = random.choice(self.actions)
-        if len(node.children) < len(self.actions):
-            node = await self.expand_async(node, action)
+        
+        if node.is_terminal():
+            self.backpropagate(node, node.evaluate())
+            return
+        
+        node = await self.expand_async(node, action)
         value = await self.simulate_async(node)
         self.backpropagate(node, value)
 
@@ -89,7 +153,7 @@ class RStar:
             return "Unable to solve the question due to insufficient reasoning paths."
         final_trajectory = self.select_final_trajectory(trajectories)
         logger.debug(f"Final trajectory: {[node.state for node in final_trajectory]}")
-        answers = [self.extract_answer(node.state) for node in final_trajectory]
+        answers = [node.extract_answer() for node in final_trajectory]
         final_answer = self.select_best_answer(answers)
         logger.info(f"Selected final answer: {final_answer}")
         return root, final_answer, self.rstar_completion_tokens
@@ -116,6 +180,13 @@ class RStar:
             logger.debug(f"Selected random action: {action}")
             return node, action
 
+        # a node has children but not all children have been explored, then randomly select an unexplored child
+        unexplored_children = [child for child in node.children if child.visits == 0]
+        if unexplored_children:
+            best_child = random.choice(unexplored_children)
+            logger.debug(f"Selected unexplored action: {best_child.action}")
+            return best_child, best_child.action
+        
         uct_values = []
         for child in node.children:
             if child.visits == 0:
@@ -129,6 +200,10 @@ class RStar:
         return best_child, best_child.action
 
     def expand(self, node: Node, action: str) -> Node:
+        if node.is_terminal():
+            logger.debug("Node is terminal. No expansion needed.")
+            return node
+            
         prompt = self.create_prompt(node.state, action)
         new_state = self.generate_response(prompt)
         child_node = Node(new_state, action, node)
@@ -140,14 +215,14 @@ class RStar:
         current_node = node
         depth = 0
         logger.debug("Starting simulation")
-        while depth < self.max_depth:
+        while depth < self.max_depth and not current_node.is_terminal():
             if not current_node.children:
                 action = random.choice(self.actions)
                 current_node = self.expand(current_node, action)
             else:
                 current_node = random.choice(current_node.children)
             depth += 1
-        value = self.evaluate(current_node)
+        value = current_node.evaluate()
         logger.debug(f"Simulation complete. Final value: {value}")
         return value
 
@@ -165,15 +240,18 @@ class RStar:
         for i in range(self.num_rollouts):
             logger.debug(f"Rollout {i+1}/{self.num_rollouts}")
             node = root
-            while node.children:
+            while node.children and not node.is_terminal():
                 node, _ = self.select_action(node)
             action = random.choice(self.actions)
-            if len(node.children) < len(self.actions):
-                node = self.expand(node, action)
+            
+            if node.is_terminal():
+                self.backpropagate(node, node.evaluate())
+                continue
+            
             value = self.simulate(node)
             self.backpropagate(node, value)
         logger.debug("MCTS complete")
-        return self.extract_trajectories(root)
+        return self.extract_trajectories(root), root
 
     def extract_trajectories(self, root: Node) -> List[List[Node]]:
         logger.debug("Extracting trajectories")
@@ -286,50 +364,7 @@ This rephrasing should help clarify the problem and guide the solution process."
         
         # Consider it a match if there's more than 70% word overlap
         return overlap / total_words > 0.7
-
-    def evaluate(self, node: Node) -> float:
-        # Extract the final answer from the node's state
-        answer, confidence = self.extract_answer(node.state)
-        
-        # Check if the answer is a number
-        try:
-            float(answer)
-            logger.debug(f"Evaluated node. Answer: {answer}, Confidence: {confidence}, Value: {confidence}")
-            return confidence  # Return the confidence as the value
-        except ValueError:
-            logger.debug(f"Evaluated node. Answer: {answer}, Confidence: {confidence}, Value: 0.0")
-            return 0.0  # If it's not a valid number, return a low score
-
-    def extract_answer(self, final_state: str) -> Tuple[str, float]:
-        logger.debug(f"Extracting answer from state: {final_state}")
-        patterns = [
-            r"The answer is (-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"The final answer is (-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"Therefore, the answer is (-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"So, the answer is (-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"Thus, the answer is (-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"In conclusion, the answer is (-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, final_state)
-            if match:
-                answer = match.group(1)
-                confidence = 1.0
-                logger.debug(f"Answer found using pattern '{pattern}': {answer}")
-                return answer, confidence
-        
-        # If no pattern is found, try to extract any number
-        numbers = re.findall(r'-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?', final_state)
-        if numbers:
-            answer = numbers[-1]  # Take the last number found
-            confidence = 0.5  # Lower confidence as it's not in the expected format
-            logger.debug(f"No pattern found. Using last number as answer: {answer}")
-            return answer, confidence
-        
-        logger.warning("No answer found in the state.")
-        return "", 0.0
-   
+    
     def solve(self, question: str) -> str:
         """
         Synchronous wrapper for solve_async method.
