@@ -66,7 +66,11 @@ def visualize_mcts_tree(root_node, output_file="mcts_tree"):
             nodesep='0.8',
             pad='0.5')
     
-    # Save the visualization with higher DPI and larger size
+    dot.attr('graph', ratio='compress') # Helps with fitting to page
+    dot.attr('node', fontsize='10')    # Adjust node font size
+    dot.attr('edge', fontsize='10')    # Adjust edge label font size
+
+    # For rendering, you can try SVG format instead of PNG for better scaling
     dot.render(output_file, 
-              view=True, 
-              format='png')
+            view=True, 
+            format='svg') 

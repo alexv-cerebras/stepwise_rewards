@@ -43,12 +43,12 @@ class Node:
     def extract_answer(self) -> Tuple[str, float]:
         logger.debug(f"Extracting answer from state: {self.state}")
         patterns = [
-            r"The answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"The final answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"Therefore, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"So, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"Thus, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
-            r"In conclusion, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"(?i)The answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"(?i)The final answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"(?i)Therefore, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"(?i)So, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"(?i)Thus, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
+            r"(?i)In conclusion, the answer is\s+(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:/\d+)?)",
         ]
         
         for pattern in patterns:
@@ -103,6 +103,8 @@ class Tree:
                         next_level.append(child)
                     
             prev_level = next_level
+            
+        _ = await self.finish_trajectories_async(root)
         return root
     
     def run(self, question: str):
@@ -134,6 +136,25 @@ class Tree:
     
     async def generate_response_async(self, prompt: str, temperature = 0.2) -> str:
         return await asyncio.to_thread(self.generate_response, prompt, temperature)
+    
+    async def finish_trajectories_async(self, root) -> List[Node]:
+        def get_trajectory(node: Node) -> List[Node]:
+            trajectory = [node]
+            while node.parent:
+                node = node.parent
+                trajectory.append(node)
+            return trajectory[::-1]
+        
+        queue = [root]
+        while queue:
+            current_node = queue.pop(0)
+            if not current_node.children and not current_node.is_terminal():
+                trajectory = get_trajectory(current_node)
+                discriminator_prompt = self.create_discriminator_prompt(trajectory)
+                final_thought = await self.generate_response_async(discriminator_prompt, 0.1)
+                current_node.children.append(Node(final_thought, current_node))
+            else:
+                queue.extend(current_node.children)
 
     def create_prompt(self, state: str) -> str:
         question = self.original_question if hasattr(self, 'original_question') else "the original question"
@@ -149,4 +170,4 @@ If you can determine the final answer at this step, state it clearly."""
     def create_discriminator_prompt(self, partial_trajectory: List[Node]) -> str:
         states = [node.state for node in partial_trajectory]
         partial_reasoning = " ".join(states)
-        return f"Given the partial reasoning:\n{partial_reasoning}\nComplete the reasoning to solve the problem:"
+        return f"Given the partial reasoning:\n{partial_reasoning}\nComplete the reasoning to solve the problem with the final answer:"
