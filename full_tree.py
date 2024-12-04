@@ -87,14 +87,8 @@ class Tree:
         self.system = system
         self.max_depth = max_depth
         self.n_children = n_children
-
-    # async def generate_response_async(self, prompt: str, temperature = 0.2) -> str:
-    #     return await asyncio.to_thread(self.generate_response, prompt, temperature)
     
-    # def run(self, question: str) -> str:
-    #     return asyncio.run(self.run_async(question))
-    
-    def run(self, question: str):
+    async def run_async(self, question):
         self.original_question = question  
         root = Node(question)      
         prev_level = [root]
@@ -102,7 +96,7 @@ class Tree:
         for _ in tqdm(range(self.max_depth)):    
             next_level = []
             for current_node in prev_level:
-                children = self.expand(current_node)
+                children = await self.expand_async(current_node)
                 
                 for child in children:
                     if not child.is_terminal():
@@ -111,11 +105,14 @@ class Tree:
             prev_level = next_level
         return root
     
-    def expand(self, node: Node) -> Node:        
+    def run(self, question: str):
+        return asyncio.run(self.run_async(question))
+    
+    async def expand_async(self, node: Node) -> Node:        
         temperatures = [0.1] +  (self.n_children-1)*[1.0]
         for temp in temperatures:
             prompt = self.create_prompt(node.state)
-            new_state = self.generate_response(prompt, temp)
+            new_state = await self.generate_response_async(prompt, temp)
             child_node = Node(new_state, node)
             node.children.append(child_node)
         return node.children
@@ -134,6 +131,9 @@ class Tree:
         generated_response = response.choices[0].message.content.strip()
         logger.debug(f"Generated response: {generated_response}")
         return generated_response
+    
+    async def generate_response_async(self, prompt: str, temperature = 0.2) -> str:
+        return await asyncio.to_thread(self.generate_response, prompt, temperature)
 
     def create_prompt(self, state: str) -> str:
         question = self.original_question if hasattr(self, 'original_question') else "the original question"
