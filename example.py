@@ -1,4 +1,4 @@
-from full_tree import Tree
+from tree import Tree
 from utils import visualize_mcts_tree
 import os
 import openai

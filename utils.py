@@ -1,5 +1,4 @@
 from graphviz import Digraph
-from full_tree import Node
 import textwrap
 import uuid
 
@@ -14,15 +13,15 @@ def print_tree(node: None, level: int = 0):
     for child in node.children:
         print_tree(child, level + 1)
 
-def visualize_mcts_tree(root_node, output_file="mcts_tree"):
+def visualize_tree(root_node, output_file="stepwise_tree"):
     """
     Create a visualization of the MCTS tree using graphviz with complete text display.
     
     Args:
-        root_node (MCTSNode): Root node of the MCTS tree
+        root_node (Node): Root node of the tree
         output_file (str): Name of the output file (without extension)
     """
-    dot = Digraph(comment='MCTS Tree')
+    dot = Digraph(comment='Stepwise Tree')
     dot.attr(rankdir='TB')
     
     # Set default node attributes
