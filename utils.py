@@ -1,10 +1,10 @@
 from graphviz import Digraph
-from binary_tree import Node
+from full_tree import Node
 import textwrap
 import uuid
 
 
-def print_tree(node: Node | None, level: int = 0):
+def print_tree(node: None, level: int = 0):
     if node is None:
         return
     indent = " " * level * 2
@@ -69,6 +69,4 @@ def visualize_mcts_tree(root_node, output_file="mcts_tree"):
     # Save the visualization with higher DPI and larger size
     dot.render(output_file, 
               view=True, 
-              format='png',
-              renderer='cairo',
-              formatter='cairo')
+              format='png')
